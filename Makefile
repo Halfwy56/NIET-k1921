@@ -90,6 +90,7 @@ ASM_SRC := \
 
 C_SRC := \
   ./app/main.c \
+  ./app/max7219.c \
   $(BSP)/bsp.c \
   $(DEV)/source/system_k1921vg5t.c \
   $(DEV)/source/sys_init.c \
@@ -120,7 +121,8 @@ DEFS := \
   -DUSE_LIBC \
   -DSYSCLK_HSE \
   -DCKO_NONE \
-  -DHSECLK_VAL=16000000
+  -DHSECLK_VAL=16000000 \
+  -DRETARGET
 
 OPT := -Og -g3
 

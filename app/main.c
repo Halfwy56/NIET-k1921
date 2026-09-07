@@ -23,11 +23,15 @@
 #include <system_k1921vg5t.h>
 #include "retarget.h"
 #include "bsp.h"
+#include "max7219.h"
 
 //-- Defines -------------------------------------------------------------------
 
 // Частота мигания светодиода, Гц (полных циклов вкл/выкл в секунду)
-#define BLINK_FREQ_HZ 1
+#define BLINK_FREQ_HZ 10
+
+
+
 
 void TMR0_IRQHandler();
 
@@ -61,6 +65,7 @@ void periph_init()
 	retarget_init();
 	printf("K1921VG5T SYSCLK = %d MHz\r\n",(int)(SystemCoreClock / 1000000));
 	printf("  Start RunLeds\r\n");
+	MAX7219_Init();
 }
 
 //--- USER FUNCTIONS ----------------------------------------------------------------------
@@ -91,6 +96,12 @@ int main(void)
 void TMR0_IRQHandler()
 {
 	BSP_LED_Toggle();
+
+	// "Бегущий огонёк" по одной строке матрицы MAX7219
+	static uint8_t col = 0;
+	MAX7219_SetRow(1, 1 << col);
+	col = (col + 1) % 8;
+
     //Сбрасываем флаг прерывания таймера
     TMR0->IC = 1;
 }
