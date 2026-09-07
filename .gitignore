@@ -1,0 +1,23 @@
+# --- Результаты сборки ---
+build/
+*.elf
+*.bin
+*.hex
+*.o
+*.d
+*.map
+*.lst
+*.su
+
+# --- Тулчейн/патч НИИЭТ (не мой код) ---
+sc-dt/
+
+# --- VS Code: игнорим всё, кроме нужных конфигов ---
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+
+# --- ОС ---
+Thumbs.db
+Desktop.ini

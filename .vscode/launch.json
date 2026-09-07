@@ -1,0 +1,54 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug (OpenOCD)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/run_leds.elf",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "C:\\niiet\\gcc\\bin\\riscv64-unknown-elf-gdb.exe",
+      "miDebuggerServerAddress": "localhost:3333",
+      "preLaunchTask": "gdbserver",
+      "stopAtConnect": true,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set architecture riscv:rv32" },
+        { "text": "set mem inaccessible-by-default off" },
+        { "text": "set remotetimeout 20" },
+        { "text": "set remote hardware-breakpoint-limit 2" },
+        { "text": "set print pretty on" }
+      ],
+      "postRemoteConnectCommands": [
+        { "text": "monitor reset halt" },
+        { "text": "load" },
+        { "text": "monitor reset halt" }
+      ],
+      "logging": { "engineLogging": false, "trace": false }
+    },
+    {
+      "name": "Attach (без перепрошивки)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/run_leds.elf",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "C:\\niiet\\gcc\\bin\\riscv64-unknown-elf-gdb.exe",
+      "miDebuggerServerAddress": "localhost:3333",
+      "preLaunchTask": "gdbserver",
+      "stopAtConnect": true,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set architecture riscv:rv32" },
+        { "text": "set mem inaccessible-by-default off" },
+        { "text": "set remotetimeout 20" },
+        { "text": "set remote hardware-breakpoint-limit 2" }
+      ],
+      "postRemoteConnectCommands": [
+        { "text": "monitor halt" }
+      ],
+      "logging": { "engineLogging": false, "trace": false }
+    }
+  ]
+}

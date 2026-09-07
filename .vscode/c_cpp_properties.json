@@ -1,0 +1,19 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "K1921VG5T",
+      "compilerPath": "C:/niiet/gcc/bin/riscv64-unknown-elf-gcc.exe",
+      "compilerArgs": ["-march=rv32imfc_zicsr_zifencei", "-mabi=ilp32f"],
+      "cStandard": "c11",
+      "intelliSenseMode": "gcc-x64",
+      "includePath": [
+        "${workspaceFolder}/app",
+        "C:/niiet/k1921vg5t_sdk/platform/Device/K1921VG5T/include",
+        "C:/niiet/k1921vg5t_sdk/hardware/bsp/NIIET-MINI-K1921VG5T",
+        "C:/niiet/k1921vg5t_sdk/platform/retarget/Template/K1921VG5T"
+      ],
+      "defines": []
+    }
+  ]
+}

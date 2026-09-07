@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      "PATH": "C:\\niiet\\gcc\\bin;C:\\niiet\\kit\\bin;${env:PATH}"
+    }
+  },
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "make",
+      "args": ["all"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "clean",
+      "type": "shell",
+      "command": "make",
+      "args": ["clean"],
+      "problemMatcher": []
+    },
+    {
+      "label": "flash",
+      "type": "shell",
+      "command": "make",
+      "args": ["flash"],
+      "dependsOn": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "erase",
+      "type": "shell",
+      "command": "make",
+      "args": ["erase"],
+      "problemMatcher": []
+    },
+    {
+      "label": "gdbserver",
+      "type": "shell",
+      "command": "make",
+      "args": ["gdbserver"],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": [{ "regexp": ".", "file": 1, "location": 2, "message": 3 }],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*Open On-Chip Debugger.*",
+          "endsPattern": ".*Listening on port 3333 for gdb connections.*"
+        }
+      }
+    }
+  ]
+}

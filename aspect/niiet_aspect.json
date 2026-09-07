@@ -1,0 +1,26 @@
+{
+  "name": "run_leds",
+  "device": "K1921VG5T",
+  "isPlib": false,
+  "middleware": {},
+  "projectIncludes": ["../../../../platform/retarget/Template/K1921VG5T"],
+  "projectLibraries": [],
+  "projectLinks": ["../app"],
+  "compilerFlags": {
+    "otherFlags": "",
+    "defines": [
+      { "name": "USE_LIBC", "value": "" }
+    ],
+    "system_defines": [
+      { "name": "SYSCLK_HSE", "value": "" },
+      { "name": "CKO_NONE", "value": "" },
+      { "name": "HSECLK_VAL", "value": "16000000" }
+    ],
+    "march": { "base": "rv32i", "extensions": ["m", "f", "c", "_zicsr", "_zifencei"] },
+    "mabi": { "base": "ilp32", "extensions": ["f"] },
+    "optimisation": "Og"
+  },
+  "linkerFlags": { "scriptFile": "./platform/Device/K1921VG5T/ldscripts/k1921vg5t_flash.ld" },
+  "debuggerInterface": "jlink",
+  "bsp": "NIIET-MINI-K1921VG5T"
+}
