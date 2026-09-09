@@ -24,12 +24,25 @@
 #endif
 
 //-- Тайминги ----------------------------------------------------------------
-// Считаем от РЕАЛЬНОЙ частоты ядра (SystemCoreClock), а не от кварца
-// (HSECLK_VAL) - если когда-нибудь появится PLL/делитель, тайминги не
-// разъедутся. Вычисляется в рантайме (не в горячем цикле - не страшно).
-// +4 такта запаса на накладные расходы цикла/вызова функции, округление
-// вверх. Верхней границы у этих задержек нет, поэтому "с запасом" безопасно.
-#define LCD_NS_TO_CYCLES(ns) ((uint32_t)(((uint64_t)(ns) * (SystemCoreClock / 1000000UL)) / 1000UL) + 4UL)
+// Считаем от РЕАЛЬНОЙ частоты ядра (SystemCoreClock), но ОДИН РАЗ при
+// инициализации: 64-битное деление в каждом шинном цикле стоит сотни тактов
+// и превращает любой таймаут в секунды ожидания.
+// +4 такта запаса на накладные расходы цикла/вызова функции.
+static uint32_t lcd_cyc_strobe = 8;  // /WR, /RD - импульс >=80нс
+static uint32_t lcd_cyc_setup  = 8;  // установка данных >=80нс
+static uint32_t lcd_cyc_access = 12; // доступ при чтении >=150нс
+static uint32_t lcd_cyc_hold   = 6;  // удержание >=40нс
+static uint32_t lcd_cyc_reset  = 200; // /RST низкий >=10мкс
+
+static void lcd_calc_delays(void)
+{
+	uint32_t mhz = SystemCoreClock / 1000000UL; // тактов на микросекунду
+	lcd_cyc_strobe = (80UL * mhz) / 1000UL + 4UL;
+	lcd_cyc_setup  = (80UL * mhz) / 1000UL + 4UL;
+	lcd_cyc_access = (150UL * mhz) / 1000UL + 4UL;
+	lcd_cyc_hold   = (40UL * mhz) / 1000UL + 4UL;
+	lcd_cyc_reset  = 10UL * mhz + 4UL;
+}
 
 static inline void lcd_delay_cycles(uint32_t n)
 {
@@ -37,13 +50,15 @@ static inline void lcd_delay_cycles(uint32_t n)
 		__asm volatile("nop");
 }
 
-#define LCD_DELAY_STROBE()  lcd_delay_cycles(LCD_NS_TO_CYCLES(80))  // /WR, /RD - импульс >=80нс
-#define LCD_DELAY_SETUP()   lcd_delay_cycles(LCD_NS_TO_CYCLES(80))  // установка данных >=80нс
-#define LCD_DELAY_ACCESS()  lcd_delay_cycles(LCD_NS_TO_CYCLES(150)) // доступ при чтении >=150нс
-#define LCD_DELAY_HOLD()    lcd_delay_cycles(LCD_NS_TO_CYCLES(40))  // удержание >=40нс
+#define LCD_DELAY_STROBE()  lcd_delay_cycles(lcd_cyc_strobe)
+#define LCD_DELAY_SETUP()   lcd_delay_cycles(lcd_cyc_setup)
+#define LCD_DELAY_ACCESS()  lcd_delay_cycles(lcd_cyc_access)
+#define LCD_DELAY_HOLD()    lcd_delay_cycles(lcd_cyc_hold)
 
 // Защита от зависания на ожидании статуса при неисправной/неподключенной шине.
-#define LCD_WAIT_TIMEOUT 200000UL
+// Одна итерация - полный цикл чтения статуса (~пара сотен нс), так что
+// 20000 итераций это единицы миллисекунд, а не секунды.
+#define LCD_WAIT_TIMEOUT 20000UL
 
 //-- Управляющие линии ---------------------------------------------------------
 static inline void lcd_wr(uint8_t level) { level ? (LCD_CTRL_PORT->DATAOUTSET = LCD_WR_MSK) : (LCD_CTRL_PORT->DATAOUTCLR = LCD_WR_MSK); }
@@ -111,7 +126,23 @@ static inline uint8_t lcd_read_status_raw(void)
 static void lcd_wait_ready(void)
 {
 	uint32_t timeout = LCD_WAIT_TIMEOUT;
-	while (((lcd_read_status_raw() & LCD_STA_NORMAL_MSK) != LCD_STA_NORMAL_MSK) && --timeout);
+	uint8_t status;
+
+	do {
+		status = lcd_read_status_raw();
+	} while (((status & LCD_STA_NORMAL_MSK) != LCD_STA_NORMAL_MSK) && --timeout);
+
+	// ДИАГНОСТИКА: если готовности так и не дождались - показываем, что
+	// реально читается со статусной шины (первые 10 раз, чтобы не спамить).
+	if (timeout == 0)
+	{
+		static uint8_t reported = 0;
+		if (reported < 10)
+		{
+			reported++;
+			printf("LCD wait_ready TIMEOUT, status=0x%02X\r\n", (unsigned)status);
+		}
+	}
 }
 
 //-- Команды с операндами --------------------------------------------------------
@@ -144,38 +175,27 @@ static void lcd_set_address_pointer(uint16_t addr)
 	lcd_cmd2(LCD_CMD_ADDRESS_POINTER, (uint8_t)addr, (uint8_t)(addr >> 8));
 }
 
-//-- Auto Write (заливка через 0xB0, не через 0xC0 на каждый байт) -----------------
-// Пока в Auto-режиме, STA0/STA1 недостоверны: готовность к записи - STA3 (0x08).
-static void lcd_auto_write(uint16_t addr, uint8_t value, uint16_t count)
+//-- Заливка области памяти ------------------------------------------------------
+// ВАЖНО: Auto Write (0xB0) на этом экземпляре SAP1024B неработоспособен -
+// контроллер не выставляет STA3, запись встаёт после нескольких байт, а после
+// такого сорванного Auto-режима команда выхода 0xB2 не восстанавливает
+// нормальное состояние: адресация и содержимое памяти портятся, экран
+// перестаёт показывать что-либо осмысленное.
+// Поэтому льём обычной командой 0xC0 (запись данных + автоинкремент адреса)
+// по штатному статусу STA0/STA1, который работает надёжно. Полный кадр
+// графики (3840 байт) при этом заливается за десятки миллисекунд.
+static void lcd_fill_area(uint16_t addr, uint8_t value, uint16_t count)
 {
 	lcd_set_address_pointer(addr);
-	lcd_cmd0(LCD_CMD_AUTO_WRITE); // вход в Auto Write - обычная команда, ждёт STA0/STA1
-
-	// ДИАГНОСТИКА: считаем, сколько байт пришлось писать "вслепую" -
-	// после таймаута ожидания STA3, так и не увидев готовность контроллера.
-	// Если таких байт много - именно они остаются с прежним (не залитым)
-	// содержимым, что и даёт эффект "гаснет не до конца".
-	uint16_t timeouts = 0;
-
 	for (uint16_t i = 0; i < count; i++)
-	{
-		uint32_t timeout = LCD_WAIT_TIMEOUT;
-		while (!(lcd_read_status_raw() & LCD_STA_AUTOWR_MSK) && --timeout);
-		if (timeout == 0)
-			timeouts++;
-		lcd_bus_write_cycle(value, 0); // запись данных без проверки STA0/STA1
-	}
-
-	// Выход из Auto-режима - команда 0xB2, тоже без STA0/STA1 (они недостоверны)
-	lcd_bus_write_cycle(LCD_CMD_AUTO_RESET, 1);
-
-	printf("Auto Write 0x%02X @0x%04X: %u/%u STA3 timeouts (INVERT=%d)\r\n",
-	       value, addr, timeouts, count, LCD_INVERT);
+		lcd_cmd1(LCD_CMD_WRITE_INC, value);
 }
 
 //-- Инициализация выводов ------------------------------------------------------
 static void lcd_gpio_init(void)
 {
+	lcd_calc_delays(); // один раз пересчитываем задержки под текущую частоту
+
 	RCU->CGCFGAHB_bit.LCD_CTRL_PORT_EN = 1;
 	RCU->RSTDISAHB_bit.LCD_CTRL_PORT_EN = 1;
 	RCU->CGCFGAHB_bit.LCD_DATA_PORT_EN = 1;
@@ -198,7 +218,7 @@ static void lcd_gpio_init(void)
 static void lcd_hw_reset(void)
 {
 	lcd_rst(0);
-	lcd_delay_cycles(LCD_NS_TO_CYCLES(10000)); // /RST низкий минимум 10 мкс
+	lcd_delay_cycles(lcd_cyc_reset); // /RST низкий минимум 10 мкс
 	lcd_rst(1);
 }
 
@@ -235,7 +255,7 @@ void lcd_init(void)
 	lcd_cmd0(LCD_CMD_MODE_SET_OR_INT); // OR, внутренний CG
 	lcd_cmd0(LCD_CMD_DISPMODE_BOTH);   // одновременно графика и текст
 
-	lcd_auto_write(LCD_TEXT_HOME, 0x00, LCD_TEXT_FRAME_SIZE);
+	lcd_fill_area(LCD_TEXT_HOME, 0x00, LCD_TEXT_FRAME_SIZE);
 	lcd_clear();
 }
 
@@ -248,7 +268,7 @@ void lcd_clear(void)
 // без учёта инверсии полярности (см. LCD_INVERT)
 void lcd_fill(uint8_t value)
 {
-	lcd_auto_write(LCD_GRAPHIC_HOME, value, LCD_GRAPHIC_FRAME_SIZE);
+	lcd_fill_area(LCD_GRAPHIC_HOME, value, LCD_GRAPHIC_FRAME_SIZE);
 }
 
 //-- Графика -----------------------------------------------------------------

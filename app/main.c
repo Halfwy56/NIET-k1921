@@ -70,14 +70,25 @@ static void lcd_draw_big_digit(uint8_t digit)
 	lcd_put_char(BIGDIGIT_COL, BIGDIGIT_ROW, (char)('0' + digit));
 }
 
-// Приём строки из UART (до '\r'/'\n') и вывод её на верхнюю текстовую
-// строку экрана. Строка всегда дополняется пробелами до ширины экрана,
-// чтобы затереть хвост предыдущего, более длинного сообщения.
-#define UART_MSG_ROW 0
+// Стартовая надпись - показывается до первого сообщения из терминала
+#define HELLO_TEXT "Hello world"
+#define HELLO_LEN  11
+#define HELLO_COL  ((LCD_M - HELLO_LEN) / 2)
+#define HELLO_ROW  (LCD_N / 2 - 1)
+
+// Приём строки из UART и вывод её на экран (в ту же центральную строку).
+// Конец сообщения - либо '\r'/'\n', либо просто пауза в приёме: терминалы
+// часто не шлют терминатор вообще (Line ending = None), поэтому не полагаемся
+// на него и ориентируемся на тишину в UART_MSG_IDLE_TICKS тиков таймера.
+#define UART_MSG_IDLE_TICKS 2 // тики TMR0, по 1/(2*BLINK_FREQ_HZ) сек каждый
 
 static char uart_msg_buf[LCD_M + 1];
 static uint8_t uart_msg_len = 0;
+static volatile uint32_t tmr_ticks = 0; // инкрементируется в TMR0_IRQHandler
+static uint32_t uart_last_tick = 0;
 
+// Строка дополняется пробелами до ширины экрана, чтобы затереть хвост
+// предыдущего, более длинного сообщения.
 static void lcd_show_message(const char *msg)
 {
 	char line[LCD_M + 1];
@@ -87,10 +98,28 @@ static void lcd_show_message(const char *msg)
 	for (; i < LCD_M; i++)
 		line[i] = ' ';
 	line[LCD_M] = '\0';
-	lcd_put_string(0, UART_MSG_ROW, line);
+	lcd_put_string(0, HELLO_ROW, line);
 }
 
-// Ненавязчивый (неблокирующий) опрос UART0: если данных нет - сразу выходим.
+static void uart_flush_message(void)
+{
+	if (uart_msg_len == 0)
+		return;
+
+	uart_msg_buf[uart_msg_len] = '\0';
+	lcd_show_message(uart_msg_buf);
+	printf("LCD message: \"%s\"\r\n", uart_msg_buf);
+	uart_msg_len = 0;
+}
+
+// Конец сообщения по паузе в приёме
+static void uart_idle_check(void)
+{
+	if (uart_msg_len > 0 && (tmr_ticks - uart_last_tick) >= UART_MSG_IDLE_TICKS)
+		uart_flush_message();
+}
+
+// Неблокирующий опрос UART0: если данных нет - сразу выходим
 static void uart_poll(void)
 {
 	if (UART0->FR_bit.RXFE)
@@ -100,25 +129,17 @@ static void uart_poll(void)
 	char ch = (char)(dr & 0xFF);
 	if (dr & 0xF00)
 	{
-		// Байт с ошибкой (например, break-condition - RX держится в 0) -
-		// не настоящие данные, в буфер сообщения не кладём.
-		printf("UART RX: 0x%02X ERR(FE=%d PE=%d BE=%d OE=%d)\r\n", (unsigned)(uint8_t)ch,
-		       (int)((dr >> 8) & 1), (int)((dr >> 9) & 1), (int)((dr >> 10) & 1), (int)((dr >> 11) & 1));
+		// Байт с ошибкой (break-condition: линия RX висит в нуле) - это не
+		// данные, молча отбрасываем.
 		UART0->RSR = 0; // сброс флагов ошибок (запись любого значения в RSR/ECR)
 		return;
 	}
 
-	printf("UART RX: 0x%02X\r\n", (unsigned)(uint8_t)ch); // ДИАГНОСТИКА
+	uart_last_tick = tmr_ticks;
 
 	if (ch == '\r' || ch == '\n')
 	{
-		if (uart_msg_len > 0)
-		{
-			uart_msg_buf[uart_msg_len] = '\0';
-			lcd_show_message(uart_msg_buf);
-			printf("LCD message: \"%s\"\r\n", uart_msg_buf);
-			uart_msg_len = 0;
-		}
+		uart_flush_message();
 		return;
 	}
 
@@ -166,6 +187,7 @@ void periph_init()
 	{
 		printf("LCD selftest: OK\r\n");
 		lcd_init(); // уже очищает и текстовую, и графическую область
+		lcd_put_string(HELLO_COL, HELLO_ROW, HELLO_TEXT);
 		lcd_draw_big_digit(lcd_digit);
 		printf("LCD init done\r\n");
 		lcd_ready = 1;
@@ -202,7 +224,10 @@ int main(void)
   {
 #if !USE_MAX7219
     if (lcd_ready)
+    {
       uart_poll();
+      uart_idle_check();
+    }
 #endif
 
     uint8_t btn_level = (GPIOA->DATA & BTN_PIN_MSK) ? 1 : 0;
@@ -245,6 +270,10 @@ int main(void)
 void TMR0_IRQHandler()
 {
 	BSP_LED_Toggle();
+
+#if !USE_MAX7219
+	tmr_ticks++; // отсчёт паузы для определения конца сообщения из UART
+#endif
 
 #if USE_MAX7219
 	// "Бегущий огонёк" по одной строке матрицы MAX7219, пока не показана цифра
