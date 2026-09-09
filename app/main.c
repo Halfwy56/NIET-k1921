@@ -53,52 +53,81 @@ static const uint8_t picture6[8] = {
 // 0 - бегущий огонёк, 1..5 - цифра, 6 - картинка picture6
 static volatile uint8_t digit_mode = 0;
 #else
-// Устанавливается в 1 после успешной lcd_init() - до этого анимация не рисует
+// Устанавливается в 1 после успешной lcd_init() - до этого кнопка не рисует
 static volatile uint8_t lcd_ready = 0;
 
-// "Бегущая полоса" из 1 пикселя: движется по диагонали от левого верхнего
-// угла к правому нижнему (алгоритм Брезенхема), затем цикл начинается заново
-static void lcd_anim_step(void)
+// Одна цифра 0..9 по центру экрана - через встроенный символогенератор
+// контроллера (текстовый слой), а не отрисовкой пикселей: смена мгновенная.
+#define BIGDIGIT_COL (LCD_M / 2)
+#define BIGDIGIT_ROW (LCD_N / 2)
+
+static uint8_t lcd_digit = 0;
+
+static void lcd_draw_big_digit(uint8_t digit)
 {
-	static int16_t x, y, err;
-	static int16_t prev_x = -1, prev_y = -1;
-	static uint8_t inited = 0;
+	if (digit > 9)
+		return;
+	lcd_put_char(BIGDIGIT_COL, BIGDIGIT_ROW, (char)('0' + digit));
+}
 
-	const int16_t dx = LCD_WIDTH - 1;
-	const int16_t dy = -(LCD_HEIGHT - 1);
+// Приём строки из UART (до '\r'/'\n') и вывод её на верхнюю текстовую
+// строку экрана. Строка всегда дополняется пробелами до ширины экрана,
+// чтобы затереть хвост предыдущего, более длинного сообщения.
+#define UART_MSG_ROW 0
 
-	if (!inited)
+static char uart_msg_buf[LCD_M + 1];
+static uint8_t uart_msg_len = 0;
+
+static void lcd_show_message(const char *msg)
+{
+	char line[LCD_M + 1];
+	uint8_t i = 0;
+	for (; i < LCD_M && msg[i]; i++)
+		line[i] = msg[i];
+	for (; i < LCD_M; i++)
+		line[i] = ' ';
+	line[LCD_M] = '\0';
+	lcd_put_string(0, UART_MSG_ROW, line);
+}
+
+// Ненавязчивый (неблокирующий) опрос UART0: если данных нет - сразу выходим.
+static void uart_poll(void)
+{
+	if (UART0->FR_bit.RXFE)
+		return;
+
+	uint32_t dr = UART0->DR; // биты 8-11 - FE/PE/BE/OE прямо рядом с данными
+	char ch = (char)(dr & 0xFF);
+	if (dr & 0xF00)
 	{
-		x = 0;
-		y = 0;
-		err = dx + dy;
-		inited = 1;
-	}
-
-	if (prev_x >= 0)
-		lcd_set_pixel((uint16_t)prev_x, (uint16_t)prev_y, 0);
-	lcd_set_pixel((uint16_t)x, (uint16_t)y, 1);
-	prev_x = x;
-	prev_y = y;
-
-	if (x == LCD_WIDTH - 1 && y == LCD_HEIGHT - 1)
-	{
-		inited = 0; // дошли до правого нижнего угла - начинаем заново
-		prev_x = -1;
+		// Байт с ошибкой (например, break-condition - RX держится в 0) -
+		// не настоящие данные, в буфер сообщения не кладём.
+		printf("UART RX: 0x%02X ERR(FE=%d PE=%d BE=%d OE=%d)\r\n", (unsigned)(uint8_t)ch,
+		       (int)((dr >> 8) & 1), (int)((dr >> 9) & 1), (int)((dr >> 10) & 1), (int)((dr >> 11) & 1));
+		UART0->RSR = 0; // сброс флагов ошибок (запись любого значения в RSR/ECR)
 		return;
 	}
 
-	int16_t e2 = 2 * err;
-	if (e2 >= dy) { err += dy; x++; }
-	if (e2 <= dx) { err += dx; y++; }
-}
+	printf("UART RX: 0x%02X\r\n", (unsigned)(uint8_t)ch); // ДИАГНОСТИКА
 
-// По нажатию кнопки: все пиксели загораются, по следующему нажатию - гаснут.
-static uint8_t lcd_all_on = 0;
+	if (ch == '\r' || ch == '\n')
+	{
+		if (uart_msg_len > 0)
+		{
+			uart_msg_buf[uart_msg_len] = '\0';
+			lcd_show_message(uart_msg_buf);
+			printf("LCD message: \"%s\"\r\n", uart_msg_buf);
+			uart_msg_len = 0;
+		}
+		return;
+	}
+
+	if (uart_msg_len < LCD_M)
+		uart_msg_buf[uart_msg_len++] = ch;
+}
 #endif // USE_MAX7219
 
 void TMR0_IRQHandler();
-extern void InterruptDisable(void); // есть в system_k1921vg5t.c, но не объявлена в заголовке
 
 void TMR0_init(uint32_t period)
 {
@@ -137,8 +166,7 @@ void periph_init()
 	{
 		printf("LCD selftest: OK\r\n");
 		lcd_init(); // уже очищает и текстовую, и графическую область
-		lcd_draw_rect(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1);
-		lcd_put_string(1, 1, "SAP1024B OK");
+		lcd_draw_big_digit(lcd_digit);
 		printf("LCD init done\r\n");
 		lcd_ready = 1;
 	}
@@ -172,6 +200,11 @@ int main(void)
 
   while(1)
   {
+#if !USE_MAX7219
+    if (lcd_ready)
+      uart_poll();
+#endif
+
     uint8_t btn_level = (GPIOA->DATA & BTN_PIN_MSK) ? 1 : 0;
 
     if (btn_level != btn_idle_level && !btn_pressed)
@@ -187,15 +220,9 @@ int main(void)
 #else
         if (lcd_ready)
         {
-          lcd_all_on = !lcd_all_on;
-          // На время заливки запрещаем прерывания: TMR0_IRQHandler дёргает
-          // lcd_anim_step(), и если он влезет посреди Auto Write своими
-          // командами на ту же шину ЖКИ, протокол собьётся и заливка
-          // получится неполной/повреждённой.
-          InterruptDisable();
-          lcd_fill(lcd_all_on ? 0xFF : 0x00);
-          InterruptEnable();
-          printf("Button pressed: LCD %s\r\n", lcd_all_on ? "all ON" : "all OFF");
+          lcd_digit = (lcd_digit + 1) % 10;
+          lcd_draw_big_digit(lcd_digit);
+          printf("Button pressed: digit=%d\r\n", lcd_digit);
         }
         else
         {
@@ -227,9 +254,6 @@ void TMR0_IRQHandler()
 		MAX7219_SetRow(1, 1 << col);
 		col = (col + 1) % 8;
 	}
-#else
-	if (lcd_ready)
-		lcd_anim_step();
 #endif
 
     //Сбрасываем флаг прерывания таймера

@@ -5,12 +5,13 @@
 
 #include "lcd.h"
 #include <K1921VG5T.h>
+#include <system_k1921vg5t.h>
 #include <stdio.h>
 
 // На этом экземпляре стекла байт 0x00 в графической памяти может физически
 // светить всеми точками (инвертированная полярность матрицы). Если после
 // прошивки с LCD_INVERT=1 разница видна, но "наоборот" - поставь 0.
-#define LCD_INVERT 1
+#define LCD_INVERT 0
 
 #if LCD_INVERT
 #define LCD_BLANK_BYTE     0xFFu
@@ -23,12 +24,12 @@
 #endif
 
 //-- Тайминги ----------------------------------------------------------------
-// Кварц платы - 16 МГц (HSECLK_VAL). Считаем нужное число тактов на нс с
-// запасом (+4 такта на накладные расходы цикла/вызова функции), округляя
+// Считаем от РЕАЛЬНОЙ частоты ядра (SystemCoreClock), а не от кварца
+// (HSECLK_VAL) - если когда-нибудь появится PLL/делитель, тайминги не
+// разъедутся. Вычисляется в рантайме (не в горячем цикле - не страшно).
+// +4 такта запаса на накладные расходы цикла/вызова функции, округление
 // вверх. Верхней границы у этих задержек нет, поэтому "с запасом" безопасно.
-#define LCD_CLK_HZ HSECLK_VAL
-
-#define LCD_NS_TO_CYCLES(ns) ((uint32_t)(((uint64_t)(ns) * (LCD_CLK_HZ / 1000000UL)) / 1000UL) + 4UL)
+#define LCD_NS_TO_CYCLES(ns) ((uint32_t)(((uint64_t)(ns) * (SystemCoreClock / 1000000UL)) / 1000UL) + 4UL)
 
 static inline void lcd_delay_cycles(uint32_t n)
 {
@@ -128,12 +129,13 @@ static void lcd_cmd1(uint8_t cmd, uint8_t operand1)
 	lcd_bus_write_cycle(cmd, 1);
 }
 
-// Для двух операндов порядок: второй операнд, первый операнд, код команды.
+// Для двух операндов порядок записи на шину: сначала D1 (младший байт),
+// потом D2 (старший байт), и только затем код команды.
 static void lcd_cmd2(uint8_t cmd, uint8_t operand1, uint8_t operand2)
 {
 	lcd_wait_ready();
-	lcd_bus_write_cycle(operand2, 0);
 	lcd_bus_write_cycle(operand1, 0);
+	lcd_bus_write_cycle(operand2, 0);
 	lcd_bus_write_cycle(cmd, 1);
 }
 
@@ -290,6 +292,11 @@ void lcd_draw_rect(int16_t x0, int16_t y0, int16_t x1, int16_t y1)
 }
 
 //-- Текст (внутренний CG контроллера) -------------------------------------------
+// Внутренний CG ROM T6963C/SAP1024B адресуется кодом (ASCII - 0x20):
+// пробел там = 0x00, а не 0x20, как в обычной таблице ASCII. Наружу API
+// принимает обычные символы, сдвиг делаем здесь.
+#define LCD_CHAR_TO_CGCODE(c) ((uint8_t)((c) - 0x20))
+
 void lcd_put_char(uint8_t col, uint8_t row, char c)
 {
 	if (col >= LCD_M || row >= LCD_N)
@@ -297,7 +304,7 @@ void lcd_put_char(uint8_t col, uint8_t row, char c)
 
 	uint16_t addr = LCD_TEXT_HOME + (uint16_t)row * LCD_M + col;
 	lcd_set_address_pointer(addr);
-	lcd_cmd1(LCD_CMD_WRITE_INC, (uint8_t)c);
+	lcd_cmd1(LCD_CMD_WRITE_INC, LCD_CHAR_TO_CGCODE(c));
 }
 
 void lcd_put_string(uint8_t col, uint8_t row, const char *str)
@@ -309,5 +316,5 @@ void lcd_put_string(uint8_t col, uint8_t row, const char *str)
 	lcd_set_address_pointer(addr);
 
 	for (; *str && col < LCD_M; str++, col++)
-		lcd_cmd1(LCD_CMD_WRITE_INC, (uint8_t)*str); // адрес сам сдвигается (+inc)
+		lcd_cmd1(LCD_CMD_WRITE_INC, LCD_CHAR_TO_CGCODE(*str)); // адрес сам сдвигается (+inc)
 }
