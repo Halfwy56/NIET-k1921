@@ -271,6 +271,18 @@ void lcd_fill(uint8_t value)
 	lcd_fill_area(LCD_GRAPHIC_HOME, value, LCD_GRAPHIC_FRAME_SIZE);
 }
 
+void lcd_write_row(uint16_t x_byte, uint16_t y, const uint8_t *data, uint16_t count)
+{
+	if (y >= LCD_HEIGHT || x_byte >= LCD_M)
+		return;
+	if (x_byte + count > LCD_M)
+		count = LCD_M - x_byte;
+
+	lcd_set_address_pointer(LCD_GRAPHIC_HOME + (uint16_t)y * LCD_M + x_byte);
+	for (uint16_t i = 0; i < count; i++)
+		lcd_cmd1(LCD_CMD_WRITE_INC, LCD_INVERT ? (uint8_t)~data[i] : data[i]);
+}
+
 //-- Графика -----------------------------------------------------------------
 void lcd_set_pixel(uint16_t x, uint16_t y, uint8_t on)
 {

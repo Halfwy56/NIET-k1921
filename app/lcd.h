@@ -93,6 +93,11 @@ void lcd_init(void);
 void lcd_clear(void);
 void lcd_fill(uint8_t value); // 0xFF - залить весь экран (все пиксели горят)
 
+// Запись готовых байт графической памяти: count байт подряд начиная с
+// байтовой колонки x_byte (0..LCD_M-1) в пиксельной строке y. Быстрый путь
+// для вывода внешнего фреймбуфера - без пересчёта по одному пикселю.
+void lcd_write_row(uint16_t x_byte, uint16_t y, const uint8_t *data, uint16_t count);
+
 void lcd_set_pixel(uint16_t x, uint16_t y, uint8_t on);
 void lcd_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1);
 void lcd_draw_rect(int16_t x0, int16_t y0, int16_t x1, int16_t y1);

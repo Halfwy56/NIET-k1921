@@ -25,6 +25,8 @@
 #include "bsp.h"
 #include "max7219.h"
 #include "lcd.h"
+#include "ups_ui.h"
+#include <string.h>
 
 //-- Defines -------------------------------------------------------------------
 
@@ -56,67 +58,167 @@ static volatile uint8_t digit_mode = 0;
 // Устанавливается в 1 после успешной lcd_init() - до этого кнопка не рисует
 static volatile uint8_t lcd_ready = 0;
 
-// Одна цифра 0..9 по центру экрана - через встроенный символогенератор
-// контроллера (текстовый слой), а не отрисовкой пикселей: смена мгновенная.
-#define BIGDIGIT_COL (LCD_M / 2)
-#define BIGDIGIT_ROW (LCD_N / 2)
+// Счётчик миллисекунд, инкрементируется в TMR0_IRQHandler (таймер на 1 кГц)
+static volatile uint32_t ms_ticks = 0;
 
-static uint8_t lcd_digit = 0;
+// Фреймбуфер UI - 160x160, экран - 240x128. Кадр выводится ПОВЁРНУТЫМ на 90°
+// по часовой стрелке:
+//     экран_X = (FB_H-1) - кадр_Y (160 из 240 - помещается, центрируем)
+//     экран_Y = кадр_X            (из 160 строк влезают 128)
+// Левый край кадра виден полностью, не помещаются 32 столбца справа - они
+// отбрасываются.
+// Отступ слева. Адресация графической памяти байтовая, поэтому сдвиг кратен
+// 8 px: 5 байт по центру + 3 байта сдвига вправо = 8 байт = 64 px.
+#define UI_X_BYTE_OFFSET (((LCD_M - FB_STRIDE) / 2) + 3)
 
-static void lcd_draw_big_digit(uint8_t digit)
+// Мост UI -> ЖКИ: разбираем пакет дельта-передачи и выводим на экран только
+// изменившиеся тайлы. Формат: A5 5A 10 lenL lenH <payload> crc8,
+// payload = серии (ty, tx0, n, n*8 байт), тайл 8x8 px = 8 байт по строкам.
+//
+// При повороте столбец кадра становится строкой экрана, поэтому каждый тайл
+// 8x8 транспонируется и уходит на экран восемью строками по одному байту.
+int link_send(const uint8_t *p, size_t n)
 {
-	if (digit > 9)
-		return;
-	lcd_put_char(BIGDIGIT_COL, BIGDIGIT_ROW, (char)('0' + digit));
+	if (n < 6 || p[0] != 0xA5 || p[1] != 0x5A)
+		return -1;
+
+	size_t len = (size_t)p[3] | ((size_t)p[4] << 8);
+	if (len + 6 > n)
+		return -1;
+
+	const uint8_t *pl = p + 5;
+	size_t i = 0;
+	while (i + 3 <= len) {
+		uint8_t ty = pl[i], tx0 = pl[i + 1], cnt = pl[i + 2];
+		i += 3;
+		if (i + (size_t)cnt * 8 > len)
+			break;
+
+		for (uint8_t k = 0; k < cnt; k++) {
+			const uint8_t *tile = &pl[i + (size_t)k * 8];
+			uint8_t tx = tx0 + k;
+
+			// Транспонирование: out[j] - строка экрана, бит (7-r) - пиксель,
+			// пришедший из строки r тайла и столбца j.
+			uint8_t out[8] = { 0 };
+			for (int j = 0; j < 8; j++)
+				for (int r = 0; r < 8; r++)
+					if (tile[r] & (0x80u >> j))
+						out[j] |= (uint8_t)(0x80u >> (7 - r));
+
+			for (int j = 0; j < 8; j++) {
+				int y = (int)tx * 8 + j;
+				if (y >= LCD_HEIGHT)
+					break;      // правые столбцы кадра за пределами экрана
+				lcd_write_row(UI_X_BYTE_OFFSET + (FB_STRIDE - 1 - ty),
+				              (uint16_t)y, &out[j], 1);
+			}
+		}
+		i += (size_t)cnt * 8;
+	}
+	return 0;
 }
 
-// Стартовая надпись - показывается до первого сообщения из терминала
-#define HELLO_TEXT "Hello world"
-#define HELLO_LEN  11
-#define HELLO_COL  ((LCD_M - HELLO_LEN) / 2)
-#define HELLO_ROW  (LCD_N / 2 - 1)
-
-// Приём строки из UART и вывод её на экран (в ту же центральную строку).
-// Конец сообщения - либо '\r'/'\n', либо просто пауза в приёме: терминалы
-// часто не шлют терминатор вообще (Line ending = None), поэтому не полагаемся
-// на него и ориентируемся на тишину в UART_MSG_IDLE_TICKS тиков таймера.
-#define UART_MSG_IDLE_TICKS 2 // тики TMR0, по 1/(2*BLINK_FREQ_HZ) сек каждый
-
-static char uart_msg_buf[LCD_M + 1];
-static uint8_t uart_msg_len = 0;
-static volatile uint32_t tmr_ticks = 0; // инкрементируется в TMR0_IRQHandler
-static uint32_t uart_last_tick = 0;
-
-// Строка дополняется пробелами до ширины экрана, чтобы затереть хвост
-// предыдущего, более длинного сообщения.
-static void lcd_show_message(const char *msg)
+// Времени с RTC у нас нет - показываем время с момента старта.
+void ui_get_datetime(char *out /* >= 21 байт */)
 {
-	char line[LCD_M + 1];
-	uint8_t i = 0;
-	for (; i < LCD_M && msg[i]; i++)
-		line[i] = msg[i];
-	for (; i < LCD_M; i++)
-		line[i] = ' ';
-	line[LCD_M] = '\0';
-	lcd_put_string(0, HELLO_ROW, line);
+	uint32_t s = ms_ticks / 1000u;
+	uint32_t hh = (s / 3600u) % 100u, mm = (s / 60u) % 60u, ss = s % 60u;
+	static const char tpl[] = "UPTIME      00:00:00";
+	memcpy(out, tpl, sizeof tpl);
+	out[12] = (char)('0' + hh / 10); out[13] = (char)('0' + hh % 10);
+	out[15] = (char)('0' + mm / 10); out[16] = (char)('0' + mm % 10);
+	out[18] = (char)('0' + ss / 10); out[19] = (char)('0' + ss % 10);
+}
+
+// Демо-данные вместо реального контроллера ИБП: публикуем снимок состояния,
+// иначе UI покажет "NO LINK". Режим берём из пункта MODE меню SETUP - он же
+// меняется прямыми командами терминала (ONLINE/BATTERY/...).
+static uint8_t demo_fault = 7;   // код, показываемый как "FAULT E07"
+
+static void ups_demo_publish(uint32_t now)
+{
+	ups_mode_t demo_mode = ui_menu_mode();
+
+	ups_state_t s;
+	memset(&s, 0, sizeof s);
+	s.stamp_ms = now;
+	s.mode     = demo_mode;
+	s.vin_dV   = 2295;
+	s.vout_dV  = 2300;
+	s.fout_cHz = 5000;
+	s.load_pct = 45;
+
+	if (demo_mode == UPS_ONLINE) {
+		s.vbat_cV = 5460; s.soc_pct = 100; s.rt_min = 32;   // АКБ заряжена
+	} else {
+		s.vbat_cV = 5210; s.soc_pct = 74;  s.rt_min = 21;   // разряжается
+	}
+	s.fault = (demo_mode == UPS_FAULT) ? demo_fault : 0;
+
+	ups_state_publish(&s);
+}
+
+// -------------------------------------- команды из терминала (смена экрана)
+
+#define UART_MSG_IDLE_MS 100u   // тишина, после которой строка считается введённой
+
+static char     uart_msg_buf[24];
+static uint8_t  uart_msg_len = 0;
+static uint32_t uart_last_ms = 0;
+
+// Сравнение без учёта регистра - strcasecmp в nano-версии libc может не быть
+static int str_ieq(const char *a, const char *b)
+{
+	for (;; a++, b++) {
+		char ca = *a, cb = *b;
+		if (ca >= 'a' && ca <= 'z') ca -= 32;
+		if (cb >= 'a' && cb <= 'z') cb -= 32;
+		if (ca != cb) return 0;
+		if (!ca) return 1;
+	}
+}
+
+// Команды терминала заменяют кнопки панели: навигация по меню SETUP и
+// правка значений. Плюс быстрая смена режима мнемосхемы напрямую.
+static void uart_command(const char *cmd)
+{
+	if (str_ieq(cmd, "UP") || str_ieq(cmd, "U")) {
+		ui_key(KEY_UP);
+		printf("KEY UP\r\n");
+	}
+	else if (str_ieq(cmd, "DOWN") || str_ieq(cmd, "D")) {
+		ui_key(KEY_DOWN);
+		printf("KEY DOWN\r\n");
+	}
+	else if (str_ieq(cmd, "ENTER") || str_ieq(cmd, "ENT") || str_ieq(cmd, "E")) {
+		ui_key(KEY_ENTER);
+		printf("KEY ENTER\r\n");
+	}
+	else if (str_ieq(cmd, "ESC") || str_ieq(cmd, "BACK")) {
+		ui_key(KEY_ESC);
+		printf("KEY ESC\r\n");
+	}
+	else if (str_ieq(cmd, "ONLINE"))       { ui_menu_set_mode(UPS_ONLINE);  printf("Mode: ONLINE\r\n"); }
+	else if (str_ieq(cmd, "BATTERY") ||
+	         str_ieq(cmd, "BAT"))          { ui_menu_set_mode(UPS_BATTERY); printf("Mode: BATTERY\r\n"); }
+	else if (str_ieq(cmd, "BYPASS") ||
+	         str_ieq(cmd, "BYPAS"))        { ui_menu_set_mode(UPS_BYPASS);  printf("Mode: BYPASS\r\n"); }
+	else if (str_ieq(cmd, "FAULT"))        { ui_menu_set_mode(UPS_FAULT);   printf("Mode: FAULT\r\n"); }
+	else {
+		printf("Unknown command: \"%s\"\r\n", cmd);
+		printf("Keys: UP | DOWN | ENTER | ESC\r\n");
+		printf("Mode: ONLINE | BATTERY | BYPASS | FAULT\r\n");
+	}
 }
 
 static void uart_flush_message(void)
 {
 	if (uart_msg_len == 0)
 		return;
-
 	uart_msg_buf[uart_msg_len] = '\0';
-	lcd_show_message(uart_msg_buf);
-	printf("LCD message: \"%s\"\r\n", uart_msg_buf);
+	uart_command(uart_msg_buf);
 	uart_msg_len = 0;
-}
-
-// Конец сообщения по паузе в приёме
-static void uart_idle_check(void)
-{
-	if (uart_msg_len > 0 && (tmr_ticks - uart_last_tick) >= UART_MSG_IDLE_TICKS)
-		uart_flush_message();
 }
 
 // Неблокирующий опрос UART0: если данных нет - сразу выходим
@@ -129,22 +231,29 @@ static void uart_poll(void)
 	char ch = (char)(dr & 0xFF);
 	if (dr & 0xF00)
 	{
-		// Байт с ошибкой (break-condition: линия RX висит в нуле) - это не
-		// данные, молча отбрасываем.
+		// Байт с ошибкой (break-condition: линия RX висит в нуле) - не данные
 		UART0->RSR = 0; // сброс флагов ошибок (запись любого значения в RSR/ECR)
 		return;
 	}
 
-	uart_last_tick = tmr_ticks;
+	uart_last_ms = ms_ticks;
 
-	if (ch == '\r' || ch == '\n')
-	{
+	if (ch == '\r' || ch == '\n') {
 		uart_flush_message();
 		return;
 	}
+	if (ch == ' ' || ch == '\t')      // пробелы в командах не нужны
+		return;
 
-	if (uart_msg_len < LCD_M)
+	if (uart_msg_len < sizeof uart_msg_buf - 1)
 		uart_msg_buf[uart_msg_len++] = ch;
+}
+
+// Конец команды по паузе в приёме (терминал может не слать '\r'/'\n')
+static void uart_idle_check(void)
+{
+	if (uart_msg_len > 0 && (ms_ticks - uart_last_ms) >= UART_MSG_IDLE_MS)
+		uart_flush_message();
 }
 #endif // USE_MAX7219
 
@@ -187,8 +296,7 @@ void periph_init()
 	{
 		printf("LCD selftest: OK\r\n");
 		lcd_init(); // уже очищает и текстовую, и графическую область
-		lcd_put_string(HELLO_COL, HELLO_ROW, HELLO_TEXT);
-		lcd_draw_big_digit(lcd_digit);
+		ui_init();
 		printf("LCD init done\r\n");
 		lcd_ready = 1;
 	}
@@ -210,9 +318,9 @@ void delay(uint32_t a)
 int main(void)
 {
   periph_init();
-  // Каждое срабатывание таймера переключает диод, т.е. на 1 цикл мигания
-  // нужно 2 срабатывания -> частота таймера в 2 раза выше BLINK_FREQ_HZ
-  TMR0_init(SystemCoreClock/(BLINK_FREQ_HZ*2));
+  // Таймер на 1 кГц: даёт счётчик миллисекунд для UI, а светодиод мигает
+  // по этому же счётчику (см. TMR0_IRQHandler).
+  TMR0_init(SystemCoreClock / 1000u);
   InterruptEnable();
 
   // Уровень кнопки USER BTN (PA13) в состоянии покоя - определяем при
@@ -227,6 +335,8 @@ int main(void)
     {
       uart_poll();
       uart_idle_check();
+      ups_demo_publish(ms_ticks); // пока нет реального контроллера ИБП
+      ui_tick(ms_ticks);
     }
 #endif
 
@@ -243,16 +353,8 @@ int main(void)
         MAX7219_SetBuffer(digit_mode == 6 ? picture6 : digit_font[digit_mode - 1]);
         printf("Button pressed, digit=%d\r\n", digit_mode);
 #else
-        if (lcd_ready)
-        {
-          lcd_digit = (lcd_digit + 1) % 10;
-          lcd_draw_big_digit(lcd_digit);
-          printf("Button pressed: digit=%d\r\n", lcd_digit);
-        }
-        else
-        {
-          printf("Button pressed\r\n");
-        }
+        ui_key(KEY_DOWN);   // кнопка листает экраны UI
+        printf("Button pressed: next screen\r\n");
 #endif
       }
     }
@@ -269,10 +371,12 @@ int main(void)
 //-- IRQ INTERRUPT HANDLERS ---------------------------------------------------------------
 void TMR0_IRQHandler()
 {
-	BSP_LED_Toggle();
-
 #if !USE_MAX7219
-	tmr_ticks++; // отсчёт паузы для определения конца сообщения из UART
+	ms_ticks++;                                   // таймер настроен на 1 кГц
+	if (ms_ticks % (500u / BLINK_FREQ_HZ) == 0)   // полупериод мигания
+		BSP_LED_Toggle();
+#else
+	BSP_LED_Toggle();
 #endif
 
 #if USE_MAX7219
