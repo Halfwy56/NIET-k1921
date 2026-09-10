@@ -56,7 +56,7 @@ typedef enum { SCR_MIMIC = 0, SCR_N } screen_id_t;
 typedef void (*render_fn)(const ups_state_t *, uint32_t, bool);
 static const render_fn SCREEN[SCR_N] = { ui_render_mimic };
 
-#define UI_PERIOD_MS      100u    /* 10 кадров/с */
+#define UI_PERIOD_MS       40u    /* 25 кадров/с - отклик на клавиши заметно живее */
 #define STALE_MS          300u    /* нет свежих данных -> "NO LINK" */
 #define IDLE_RETURN_MS  30000u    /* авто-возврат на мнемосхему */
 

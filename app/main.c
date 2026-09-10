@@ -71,12 +71,50 @@ static volatile uint32_t ms_ticks = 0;
 // 8 px: 5 байт по центру + 3 байта сдвига вправо = 8 байт = 64 px.
 #define UI_X_BYTE_OFFSET (((LCD_M - FB_STRIDE) / 2) + 3)
 
-// Мост UI -> ЖКИ: разбираем пакет дельта-передачи и выводим на экран только
-// изменившиеся тайлы. Формат: A5 5A 10 lenL lenH <payload> crc8,
+// Буфер экрана в ОЗУ. Повёрнутая картинка собирается здесь, а в ЖКИ уходят
+// целые строки одним заходом: одна установка адреса на строку вместо одной
+// на каждый байт (после поворота тайл ложится в столбец, и без буфера каждый
+// байт требовал бы отдельной адресации - это и тормозило отклик).
+static uint8_t scr_buf[LCD_HEIGHT][LCD_M];
+static uint8_t scr_lo[LCD_HEIGHT], scr_hi[LCD_HEIGHT]; // диапазон изменённых байт
+
+static void scr_touch(uint16_t y, uint8_t x_byte, uint8_t value)
+{
+	if (y >= LCD_HEIGHT || x_byte >= LCD_M)
+		return;
+	if (scr_buf[y][x_byte] == value && scr_lo[y] <= scr_hi[y])
+		return;
+	scr_buf[y][x_byte] = value;
+	if (scr_lo[y] > scr_hi[y]) { scr_lo[y] = scr_hi[y] = x_byte; return; }
+	if (x_byte < scr_lo[y]) scr_lo[y] = x_byte;
+	if (x_byte > scr_hi[y]) scr_hi[y] = x_byte;
+}
+
+// Вывести накопленные изменения: по одной адресации на изменённую строку
+static void scr_flush(void)
+{
+	for (uint16_t y = 0; y < LCD_HEIGHT; y++) {
+		if (scr_lo[y] > scr_hi[y])
+			continue;
+		lcd_write_row(scr_lo[y], y, &scr_buf[y][scr_lo[y]],
+		              (uint16_t)(scr_hi[y] - scr_lo[y] + 1));
+		scr_lo[y] = LCD_M;   // пометить строку как чистую
+		scr_hi[y] = 0;
+	}
+}
+
+static void scr_init(void)
+{
+	memset(scr_buf, 0, sizeof scr_buf);
+	for (uint16_t y = 0; y < LCD_HEIGHT; y++) { scr_lo[y] = LCD_M; scr_hi[y] = 0; }
+}
+
+// Мост UI -> ЖКИ: разбираем пакет дельта-передачи и складываем изменившиеся
+// тайлы в буфер экрана. Формат: A5 5A 10 lenL lenH <payload> crc8,
 // payload = серии (ty, tx0, n, n*8 байт), тайл 8x8 px = 8 байт по строкам.
 //
 // При повороте столбец кадра становится строкой экрана, поэтому каждый тайл
-// 8x8 транспонируется и уходит на экран восемью строками по одному байту.
+// 8x8 транспонируется.
 int link_send(const uint8_t *p, size_t n)
 {
 	if (n < 6 || p[0] != 0xA5 || p[1] != 0x5A)
@@ -110,8 +148,9 @@ int link_send(const uint8_t *p, size_t n)
 				int y = (int)tx * 8 + j;
 				if (y >= LCD_HEIGHT)
 					break;      // правые столбцы кадра за пределами экрана
-				lcd_write_row(UI_X_BYTE_OFFSET + (FB_STRIDE - 1 - ty),
-				              (uint16_t)y, &out[j], 1);
+				scr_touch((uint16_t)y,
+				          (uint8_t)(UI_X_BYTE_OFFSET + (FB_STRIDE - 1 - ty)),
+				          out[j]);
 			}
 		}
 		i += (size_t)cnt * 8;
@@ -296,6 +335,7 @@ void periph_init()
 	{
 		printf("LCD selftest: OK\r\n");
 		lcd_init(); // уже очищает и текстовую, и графическую область
+		scr_init();
 		ui_init();
 		printf("LCD init done\r\n");
 		lcd_ready = 1;
@@ -336,7 +376,8 @@ int main(void)
       uart_poll();
       uart_idle_check();
       ups_demo_publish(ms_ticks); // пока нет реального контроллера ИБП
-      ui_tick(ms_ticks);
+      ui_tick(ms_ticks);          // рендер + дельта складываются в scr_buf
+      scr_flush();                // и уходят на ЖКИ целыми строками
     }
 #endif
 

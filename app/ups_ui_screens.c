@@ -118,25 +118,25 @@ typedef struct {
 } menu_item_t;
 
 static const char *const OPT_MODE[] = { "ONLINE", "BATTERY", "BYPASS", "FAULT" };
-static const char *const OPT_VOLT[] = { "208V", "220V", "230V", "240V" };
-static const char *const OPT_FREQ[] = { "50Hz", "60Hz" };
-static const char *const OPT_EOD1[] = { "1.75V", "1.84V", "1.92V" };
-static const char *const OPT_EOD2[] = { "1.60V", "1.70V", "1.80V" };
-static const char *const OPT_ONOFF[] = { "ON", "OFF" };
+static const char *const OPT_VOLT[] = { "208В", "220В", "230В", "240В" };
+static const char *const OPT_FREQ[] = { "50Гц", "60Гц" };
+static const char *const OPT_EOD1[] = { "1.75В", "1.84В", "1.92В" };
+static const char *const OPT_EOD2[] = { "1.60В", "1.70В", "1.80В" };
+static const char *const OPT_ONOFF[] = { "ВКЛ", "ВЫКЛ" };
 
 static menu_item_t MENU[] = {
-    { "MODE",   OPT_MODE,  4, 0, 0,   0,   0,   NULL,  0, 1 },
-    { "VOLT",   OPT_VOLT,  4, 2, 0,   0,   0,   NULL,  0, 0 },
-    { "FREQ",   OPT_FREQ,  2, 0, 0,   0,   0,   NULL,  0, 0 },
-    { "CAP",    NULL,      0, 0, 1,   200, 9,   "Ah",  2, 0 },
-    { "EOD1",   OPT_EOD1,  3, 0, 0,   0,   0,   NULL,  0, 0 },
-    { "EOD2",   OPT_EOD2,  3, 0, 0,   0,   0,   NULL,  0, 0 },
-    { "TMR1",   NULL,      0, 0, 0,   999, 0,   "min", 3, 0 },
-    { "TMR2",   NULL,      0, 0, 0,   999, 0,   "min", 3, 0 },
-    { "BYP H",  NULL,      0, 0, 230, 264, 264, "V",   3, 0 },
-    { "BYP L",  NULL,      0, 0, 170, 220, 170, "V",   3, 0 },
-    { "BEEP",   OPT_ONOFF, 2, 0, 0,   0,   0,   NULL,  0, 0 },
-    { "BYPASS", OPT_ONOFF, 2, 1, 0,   0,   0,   NULL,  0, 0 },
+    { "РЕЖИМ",    OPT_MODE,  4, 0, 0,   0,   0,   NULL,   0, 1 },
+    { "НАПРЯЖ",   OPT_VOLT,  4, 2, 0,   0,   0,   NULL,   0, 0 },
+    { "ЧАСТОТА",  OPT_FREQ,  2, 0, 0,   0,   0,   NULL,   0, 0 },
+    { "ЕМКОСТЬ",  NULL,      0, 0, 1,   200, 9,   "Ач",   2, 0 },
+    { "ПОРОГ 1",  OPT_EOD1,  3, 0, 0,   0,   0,   NULL,   0, 0 },
+    { "ПОРОГ 2",  OPT_EOD2,  3, 0, 0,   0,   0,   NULL,   0, 0 },
+    { "ТАЙМЕР 1", NULL,      0, 0, 0,   999, 0,   "мин", 3, 0 },
+    { "ТАЙМЕР 2", NULL,      0, 0, 0,   999, 0,   "мин", 3, 0 },
+    { "БАЙП В",   NULL,      0, 0, 230, 264, 264, "В",    3, 0 },
+    { "БАЙП Н",   NULL,      0, 0, 170, 220, 170, "В",    3, 0 },
+    { "ЗВУК",     OPT_ONOFF, 2, 0, 0,   0,   0,   NULL,   0, 0 },
+    { "БАЙПАС",   OPT_ONOFF, 2, 1, 0,   0,   0,   NULL,   0, 0 },
 };
 
 #define MENU_N ((int)(sizeof MENU / sizeof MENU[0]))
@@ -253,7 +253,7 @@ static void draw_header(const ups_state_t *st, bool stale)
 {
     char buf[24], *p = buf;
     if (stale) {
-        p = put_s(p, "NO LINK");
+        p = put_s(p, "НЕТ СВЯЗИ");
     } else switch (st->mode) {
         case UPS_ONLINE:  p = put_s(p, "ONLINE");     break;
         case UPS_BATTERY: p = put_s(p, "ON BATTERY"); break;
@@ -276,28 +276,29 @@ static void draw_header(const ups_state_t *st, bool stale)
 
 static void draw_data(const ups_state_t *st, bool stale)
 {
-    char l1[26], l2[26], *p;
+    /* Кириллица в UTF-8 - 2 байта на букву, поэтому буферы с запасом. */
+    char l1[48], l2[48], *p;
 
     if (stale) {
-        strcpy(l1, "NO DATA FROM CONTROL");
-        strcpy(l2, "CHECK LINK");
+        strcpy(l1, "НЕТ ДАННЫХ");
+        strcpy(l2, "ПРОВЕРЬ СВЯЗЬ");
     } else if (st->mode == UPS_FAULT) {
-        strcpy(l1, "OUTPUT OFF");
-        p = put_s(l2, "BAT ");
-        p = put_fx(p, st->vbat_cV / 10, 1, 2); p = put_s(p, "V ");
+        strcpy(l1, "ВЫХОД ОТКЛЮЧЕН");
+        p = put_s(l2, "БАТ ");
+        p = put_fx(p, st->vbat_cV / 10, 1, 2); p = put_s(p, "В ");
         p = put_u(p, st->soc_pct, 3);          p = put_s(p, "%");
         *p = 0;
     } else {
-        p = put_s(l1, "OUT ");
-        p = put_u(p, st->vout_dV / 10, 3);       p = put_s(p, "V ");
-        p = put_fx(p, st->fout_cHz / 10, 1, 2);  p = put_s(p, "Hz ");
+        p = put_s(l1, "ВЫХ ");
+        p = put_u(p, st->vout_dV / 10, 3);       p = put_s(p, "В ");
+        p = put_fx(p, st->fout_cHz / 10, 1, 2);  p = put_s(p, "Гц ");
         p = put_u(p, st->load_pct, 3);           p = put_s(p, "%");
         *p = 0;
 
-        p = put_s(l2, "BAT ");
-        p = put_fx(p, st->vbat_cV / 10, 1, 2);   p = put_s(p, "V ");
+        p = put_s(l2, "БАТ ");
+        p = put_fx(p, st->vbat_cV / 10, 1, 2);   p = put_s(p, "В ");
         p = put_u(p, st->soc_pct, 3);            p = put_s(p, "% ");
-        p = put_u(p, st->rt_min, 2);             p = put_s(p, "min");
+        p = put_u(p, st->rt_min, 2);             p = put_s(p, "мин");
         *p = 0;
     }
     fb_text(2, 84, l1);
@@ -307,7 +308,7 @@ static void draw_data(const ups_state_t *st, bool stale)
 /* Одна строка меню: номер, метка, значение, стрелка направления. */
 static void draw_menu_line(int idx, int y, char arrow)
 {
-    char num[4], val[16];
+    char num[4], val[24];
     put_u0(num, (uint32_t)idx + 1, 2);
     num[2] = 0;
     menu_value_str(&MENU[idx], MENU[idx].opt_idx, MENU[idx].value, val);
@@ -321,10 +322,10 @@ static void draw_menu_line(int idx, int y, char arrow)
 
 static void draw_menu(uint32_t anim_ms)
 {
-    char buf[16], val[16], *p;
+    char buf[16], val[24], *p;
 
     fb_hline(0, 104, FB_W);
-    fb_text(2, 108, "SETUP");
+    fb_text(2, 108, "НАСТРОЙКИ");
 
     p = put_u0(buf, (uint32_t)menu_item + 1, 2);
     p = put_s(p, "/");
@@ -359,8 +360,9 @@ static void draw_menu(uint32_t anim_ms)
 
     draw_menu_line(next, 139, 'd');
 
-    fb_text(2, 151, menu_editing ? "ENT SAVE  ESC UNDO"
-                                 : "ENT EDIT  UP DN SELECT");
+    fb_text(2, 151, menu_editing
+        ? "ВВОД СОХР   ОТМЕНА"
+        : "ВВОД ПРАВ  ВВЕРХ ВНИЗ");
 }
 
 /* ----------------------------------------------------- экран мнемосхемы */
