@@ -92,6 +92,7 @@ C_SRC := \
   ./app/main.c \
   ./app/max7219.c \
   ./app/lcd.c \
+  ./app/can.c \
   ./app/ups_ui.c \
   ./app/ups_ui_fb.c \
   ./app/ups_ui_screens.c \

@@ -26,6 +26,7 @@
 #include "max7219.h"
 #include "lcd.h"
 #include "ups_ui.h"
+#include "can.h"
 #include <string.h>
 
 //-- Defines -------------------------------------------------------------------
@@ -198,11 +199,117 @@ static void ups_demo_publish(uint32_t now)
 	ups_state_publish(&s);
 }
 
+// -------------------------------------------------------------- CAN0 (PA14/PA15)
+
+#define CAN_ID_TX   0x123u   // кадры, набранные в терминале
+#define CAN_ID_BTN  0x124u   // счётчик нажатий кнопки USER
+
+static uint32_t can_rx_count = 0;
+static uint32_t can_btn_count = 0;
+
+// Принятый кадр печатаем и байтами, и текстом - удобно ловить оба случая.
+static void can_report(const can_frame_t *f)
+{
+	printf("[%u] CAN RX id=0x%03X len=%u  ", (unsigned)can_rx_count,
+	       (unsigned)f->id, (unsigned)f->len);
+	for (uint8_t i = 0; i < f->len; i++)
+		printf("%02X ", (unsigned)f->data[i]);
+	printf(" \"");
+	for (uint8_t i = 0; i < f->len; i++)
+		putchar((f->data[i] >= 0x20 && f->data[i] < 0x7F) ? f->data[i] : '.');
+	printf("\"\r\n");
+}
+
+static void can_poll(void)
+{
+	can_frame_t f;
+
+	while (can_recv(&f)) {
+		can_rx_count++;
+		can_report(&f);
+	}
+
+	// Выбитый с шины узел молча перестаёт принимать - поднимаем сами.
+	if (can_bus_off()) {
+		printf("CAN: узел был выбит с шины по ошибкам, перезапуск\r\n");
+		can_reset();
+	}
+}
+
+// Ждём ухода кадра. Неподтверждённый кадр узел повторяет бесконечно, поэтому
+// по таймауту снимаем запрос, иначе он забьёт шину кадрами ошибок.
+static bool can_wait_sent(void)
+{
+	uint32_t t = 200000u;
+
+	while (--t && can_tx_busy())
+		;
+	if (t)
+		return true;
+
+	can_abort_tx();
+	printf("CAN: кадр не ушёл - никто не подтвердил приём. ");
+	printf("Проверь адаптер, скорость и терминаторы.\r\n");
+	return false;
+}
+
+// Текст любой длины: режем на кадры по 8 байт и шлём подряд.
+static void can_send_text(const char *txt)
+{
+	uint8_t d[8];
+	unsigned frames = 0;
+
+	if (!*txt) {
+		printf("Нечего отправлять: текст пустой\r\n");
+		return;
+	}
+
+	while (*txt) {
+		uint8_t n = 0;
+		while (n < 8 && *txt)
+			d[n++] = (uint8_t)*txt++;
+
+		if (!can_send(CAN_ID_TX, d, n)) {
+			printf("CAN: объект передачи занят\r\n");
+			return;
+		}
+		frames++;
+		if (!can_wait_sent())
+			return;
+	}
+	printf("CAN TX id=0x%03X: отправлено кадров %u\r\n",
+	       (unsigned)CAN_ID_TX, frames);
+}
+
+// Нажатие кнопки: уходит номер нажатия цифрами ASCII.
+static void can_send_btn(void)
+{
+	uint8_t d[8];
+	uint8_t n = 0;
+	uint32_t v;
+	char tmp[10];
+	uint8_t m = 0;
+
+	can_btn_count++;
+	v = can_btn_count;
+	do { tmp[m++] = (char)('0' + v % 10u); v /= 10u; } while (v && m < sizeof tmp);
+	while (m && n < 8) d[n++] = (uint8_t)tmp[--m];
+
+	if (!can_send(CAN_ID_BTN, d, n)) {
+		printf("Кнопка: нажатие %u, объект передачи занят\r\n",
+		       (unsigned)can_btn_count);
+		return;
+	}
+	printf("Кнопка: нажатие %u -> CAN id=0x%03X \"%.*s\"\r\n",
+	       (unsigned)can_btn_count, (unsigned)CAN_ID_BTN, (int)n, (const char *)d);
+	can_wait_sent();
+}
+
 // -------------------------------------- команды из терминала (смена экрана)
 
 #define UART_MSG_IDLE_MS 100u   // тишина, после которой строка считается введённой
 
-static char     uart_msg_buf[24];
+static char     uart_msg_buf[80];
 static uint8_t  uart_msg_len = 0;
 static uint32_t uart_last_ms = 0;
 
@@ -244,20 +351,42 @@ static void uart_command(const char *cmd)
 	else if (str_ieq(cmd, "BYPASS") ||
 	         str_ieq(cmd, "BYPAS"))        { ui_menu_set_mode(UPS_BYPASS);  printf("Mode: BYPASS\r\n"); }
 	else if (str_ieq(cmd, "FAULT"))        { ui_menu_set_mode(UPS_FAULT);   printf("Mode: FAULT\r\n"); }
+	else if (str_ieq(cmd, "CANST"))        { can_print_status("состояние"); }
+	else if (str_ieq(cmd, "CANRST"))       { can_reset();
+	                                         printf("CAN: узел перезапущен\r\n");
+	                                         can_print_status("состояние"); }
+	/* CAN:<текст> или CAN <текст> - отправить в шину. Пробелы сохраняются. */
+	else if ((cmd[0] == 'C' || cmd[0] == 'c') &&
+	         (cmd[1] == 'A' || cmd[1] == 'a') &&
+	         (cmd[2] == 'N' || cmd[2] == 'n') &&
+	         (cmd[3] == ':' || cmd[3] == ' ')) {
+		const char *p = cmd + 4;
+		while (*p == ' ') p++;
+		can_send_text(p);
+	}
 	else {
 		printf("Unknown command: \"%s\"\r\n", cmd);
 		printf("Keys: UP | DOWN | ENTER | ESC\r\n");
 		printf("Mode: ONLINE | BATTERY | BYPASS | FAULT\r\n");
+		printf("CAN:  CAN <текст> | CANST | CANRST\r\n");
 	}
 }
 
 static void uart_flush_message(void)
 {
-	if (uart_msg_len == 0)
-		return;
+	char *b = uart_msg_buf;
+	char *e = uart_msg_buf + uart_msg_len;
+
 	uart_msg_buf[uart_msg_len] = '\0';
-	uart_command(uart_msg_buf);
 	uart_msg_len = 0;
+
+	/* Пробелы по краям убираем, внутри строки они значимы. */
+	while (*b == ' ') b++;
+	while (e > b && e[-1] == ' ') e--;
+	*e = '\0';
+
+	if (*b)
+		uart_command(b);
 }
 
 // Неблокирующий опрос UART0: если данных нет - сразу выходим
@@ -281,7 +410,9 @@ static void uart_poll(void)
 		uart_flush_message();
 		return;
 	}
-	if (ch == ' ' || ch == '\t')      // пробелы в командах не нужны
+	if (ch == '\t')                  // табуляцию считаем пробелом
+		ch = ' ';
+	if (ch < 0x20)                    // прочие управляющие - мимо
 		return;
 
 	if (uart_msg_len < sizeof uart_msg_buf - 1)
@@ -328,6 +459,8 @@ void periph_init()
 	retarget_init();
 	printf("K1921VG5T SYSCLK = %d MHz\r\n",(int)(SystemCoreClock / 1000000));
 	printf("  Start RunLeds\r\n");
+	can_init();
+	can_print_status("CAN0");
 #if USE_MAX7219
 	MAX7219_Init();
 #else
@@ -371,10 +504,12 @@ int main(void)
   while(1)
   {
 #if !USE_MAX7219
+    uart_poll();
+    uart_idle_check();
+    can_poll();
+
     if (lcd_ready)
     {
-      uart_poll();
-      uart_idle_check();
       ups_demo_publish(ms_ticks); // пока нет реального контроллера ИБП
       ui_tick(ms_ticks);          // рендер + дельта складываются в scr_buf
       scr_flush();                // и уходят на ЖКИ целыми строками
@@ -395,7 +530,7 @@ int main(void)
         printf("Button pressed, digit=%d\r\n", digit_mode);
 #else
         ui_key(KEY_DOWN);   // кнопка листает экраны UI
-        printf("Button pressed: next screen\r\n");
+        can_send_btn();
 #endif
       }
     }
